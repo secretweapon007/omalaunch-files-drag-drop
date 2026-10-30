@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "secretweapon.omalaunch-files-drag-drop",
+  "capability": "files",
+  "mode": "files",
+  "label": "Files",
+  "prefixes": ["files"],
+  "icon": "󰉋",
+  "description": "Browse and search files",
+  "rootDescription": "Browse and search files",
+  "priority": 20,
+  "root": "~",
+  "dragAndDrop": true,
+  "requires": ["fd", "fzf", "jq", "python", "xdg-open", "xdg-terminal-exec", "wl-copy"],
+  "command": ["xdg-open", "{path}"],
+  "directoryCommand": ["xdg-open", "{path}"],
+  "terminalCommand": ["xdg-terminal-exec", "--dir={path}"],
+  "copyCommand": ["wl-copy", "--", "{path}"],
+  "copyFileCommand": ["python", "-c", "import pathlib, subprocess, sys; uri = pathlib.Path(sys.argv[1]).resolve().as_uri() + '\\r\\n'; subprocess.run(['wl-copy', '--type', 'text/uri-list'], input=uri, text=True, check=True)", "{path}"]
+}

@@ -1,0 +1,304 @@
+diff --git a/EXTENSIONS.md b/EXTENSIONS.md
+index 920b9e0..e712f61 100644
+--- a/EXTENSIONS.md
++++ b/EXTENSIONS.md
+@@ -137,6 +137,20 @@ File browser extensions provide navigation, recursive search, opening, and path
+ 
+ Ctrl+H toggles hidden files for the current file-browser session. Ctrl+K opens the contextual Action Panel. `command` opens files, `directoryCommand` opens directories in the file manager, `terminalCommand` opens a terminal, `copyCommand` copies the path, and `copyFileCommand` places a file URI on the clipboard. All command fields support `{path}`. Files and directories can be starred from the Action Panel or with Ctrl+S and then opened directly from the launcher’s starting view. Each star belongs to the exact provider that created it, so a replacement does not inherit bundled Files favorites. The bundled implementation starts at the home directory, uses `fd` traversal and fzf path ranking, omits hidden and ignored paths by default, includes hidden paths except `.git` internals for the current session after Ctrl+H, and limits each ranked result set to 100 entries. Exact basename matches rank before paths that match only through a parent directory, so many descendants cannot hide a matching file or directory. Recursive candidates are indexed once per active directory and reused while typing; the index refreshes after 30 seconds or when navigation changes directories.
+ 
++### Native file dragging
++
++A file-browser provider can opt into host-provided native dragging by setting `"dragAndDrop": true`. This optional field accepts only a boolean and is valid only with `mode: "files"`; declaring it on another mode, including `false`, rejects the definition. Omitting it or setting it to `false` preserves ordinary browsing without dragging. The opt-in belongs to the selected provider, so disabling or removing a replacement does not enable dragging on the bundled fallback.
++
++Hosts supporting this contract advertise `"files.drag-and-drop.v1"` in their own `manifest.json` at `omalaunch.hostFeatures`:
++
++```json
++"omalaunch": { "hostFeatures": ["files.drag-and-drop.v1"] }
++```
++
++Check this feature marker rather than a version number: an older host may ignore an unknown `dragAndDrop` field and still display the provider without supporting dragging. This declaration is host metadata, not an extension manifest requirement.
++
++The host makes real file and directory results draggable from browsing and recursive search into applications that accept file drops. It sends native `text/uri-list` data with copy-only semantics; it does not move or delete the original. The launcher gets out of the way during the drag and closes after the drop or cancellation. Parent-navigation rows, action-panel commands, and workflow pickers do not become drag sources. Extensions supply no QML or drag implementation.
++
+ ## Workflow extension
+ 
+ Workflow extensions contribute a launcher entry and a bounded tree of host-rendered stages. They can compose menus, text input, and Omalaunch's host-provided directory picker without shipping QML or implementing filesystem navigation:
+@@ -441,6 +455,7 @@ The highest-priority matching live-query extension runs. Live queries debounce f
+ - `command`: Argument array. Prefix mode supports `{prompt}`; query mode supports `{query}`; menu providers support `{extensionDir}`.
+ - `configuration`: Optional menu-mode metadata with a registered bundled `provider`. Omalaunch then supplies the Settings · Ctrl+, footer shortcut and standard editor and agent actions.
+ - `refreshable`: Default manual Ctrl+R behavior for the extension's menus and documents. It defaults to `false`; individual dynamic nodes can override it.
++- `dragAndDrop`: Optional files-mode boolean requesting the host's `files.drag-and-drop.v1` native-drag feature. Defaults to `false`; invalid in every other mode.
+ 
+ Commands are argument arrays. Omalaunch substitutes placeholders and shell-quotes action arguments. Do not embed pipes, redirects, or other shell syntax.
+ 
+diff --git a/FileDragSource.qml b/FileDragSource.qml
+new file mode 100644
+index 0000000..5af3652
+--- /dev/null
++++ b/FileDragSource.qml
+@@ -0,0 +1,38 @@
++import QtQuick
++import Quickshell
++import "MenuModel.js" as MenuModel
++
++// Keep the native drag alive independently of ListView delegate refreshes.
++Item {
++  id: root
++  property bool dragging: false
++  property string fileUrl: ""
++  property bool directory: false
++  signal finished(int action)
++
++  function begin(path, isDirectory) {
++    if (root.Drag.active || root.dragging) return
++    var url = MenuModel.localFileUrl(path)
++    if (!url) return
++    root.fileUrl = url
++    root.directory = isDirectory === true
++    root.Drag.active = true
++  }
++
++  Drag.dragType: Drag.Automatic
++  Drag.supportedActions: Qt.CopyAction
++  Drag.proposedAction: Qt.CopyAction
++  Drag.mimeData: ({ "text/uri-list": root.fileUrl + "\r\n" })
++  Drag.imageSource: Quickshell.iconPath(root.directory ? "folder" : "text-x-generic", true)
++  Drag.imageSourceSize: Qt.size(48, 48)
++  Drag.hotSpot: Qt.point(12, 12)
++  Drag.onDragStarted: root.dragging = true
++  Drag.onDragFinished: function(action) {
++    // Unmap the launcher only after Qt has finished its native drag loop.
++    Qt.callLater(function() {
++      root.dragging = false
++      root.fileUrl = ""
++      root.finished(action)
++    })
++  }
++}
+diff --git a/Menu.qml b/Menu.qml
+index e1165fb..964028e 100644
+--- a/Menu.qml
++++ b/Menu.qml
+@@ -41,6 +41,7 @@ Item {
+   property bool routePendingForMenuSources: false
+ 
+   function open(payloadJson) {
++    if (root.externalFileDragActive) return
+     // Parse first so resetting the old surface cannot discard the incoming
+     // request. Completion of a replaced dmenu is queued before its protocol
+     // fields are cleared and before the new surface is installed.
+@@ -149,6 +150,7 @@ Item {
+   readonly property int extensionQueryTimeoutMs: 5000
+   readonly property int extensionQueryTerminationGraceMs: 500
+   property bool fileBrowserActive: false
++  readonly property bool externalFileDragActive: fileDragSource.dragging
+   property bool directoryPickerActive: false
+   property bool filePickerActive: false
+   readonly property bool workflowPickerActive: directoryPickerActive || filePickerActive
+@@ -3140,6 +3142,7 @@ Item {
+   }
+ 
+   function cancel() {
++    if (root.externalFileDragActive) return
+     root.invalidateWorkflowAction("launcher canceled")
+     root.invalidateSubmenu("launcher canceled")
+     root.invalidateDocument("launcher canceled")
+@@ -4482,8 +4485,18 @@ Item {
+     color: "transparent"
+     WlrLayershell.namespace: "omarchy-menu"
+     WlrLayershell.layer: WlrLayer.Overlay
+-    WlrLayershell.keyboardFocus: WlrKeyboardFocus.OnDemand
++    WlrLayershell.keyboardFocus: root.externalFileDragActive ? WlrKeyboardFocus.None : WlrKeyboardFocus.OnDemand
+     exclusionMode: ExclusionMode.Ignore
++    // Stay mapped as the Wayland drag origin, while allowing the destination
++    // window underneath the fullscreen launcher to receive the drop.
++    mask: root.externalFileDragActive ? dragInputMask : null
++
++    Region { id: dragInputMask }
++
++    FileDragSource {
++      id: fileDragSource
++      onFinished: root.cancel()
++    }
+ 
+     // Keep the top edge fixed while result and submenu heights change.
+     readonly property int pinnedTop: Math.max(Style.gapsOut, Math.round(height * 0.25))
+@@ -4491,6 +4504,7 @@ Item {
+     Rectangle {
+       anchors.fill: parent
+       color: root.scrim
++      opacity: root.externalFileDragActive ? 0 : 1
+     }
+ 
+     MouseArea {
+@@ -4503,13 +4517,14 @@ Item {
+     // above only covers the opening one. With OnDemand focus this grab routes
+     // input compositor-wide instead, so clicking away works from any monitor.
+     HyprlandFocusGrab {
+-      active: panel.visible
++      active: panel.visible && !root.externalFileDragActive
+       windows: [panel]
+       onCleared: root.cancel()
+     }
+ 
+     BorderSurface {
+       id: card
++      opacity: root.externalFileDragActive ? 0 : 1
+       width: root.cardWidth
+       height: Math.min(root.cardHeight, panel.height - Style.gapsOut - panel.pinnedTop)
+       radius: root.cornerRadius
+@@ -5099,9 +5114,11 @@ Item {
+ 
+               MouseArea {
+                 id: mouseArea
++                property bool fileDragStarted: false
+                 anchors.fill: parent
+                 hoverEnabled: true
+-                cursorShape: Qt.PointingHandCursor
++                cursorShape: fileDragHandler.enabled ? Qt.OpenHandCursor : Qt.PointingHandCursor
++                onPressed: mouseArea.fileDragStarted = false
+                 onEntered: root.selectFromPointer(row.index, row, {
+                   x: mouseArea.mouseX,
+                   y: mouseArea.mouseY
+@@ -5110,11 +5127,30 @@ Item {
+                   root.selectFromPointer(row.index, row, mouse)
+                 }
+                 onClicked: {
++                  if (mouseArea.fileDragStarted) return
+                   root.cursorActive = true
+                   root.selectedIndex = row.index
+                   root.activateIndex(row.index, true)
+                 }
+               }
++
++              DragHandler {
++                id: fileDragHandler
++                target: null
++                acceptedButtons: Qt.LeftButton
++                acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
++                enabled: root.fileBrowserActive && !!root.fileBrowserExtension
++                  && root.fileBrowserExtension.dragAndDrop === true
++                  && !root.workflowPickerActive && !root.actionPanelActive
++                  && (row.itemId.indexOf("file.item.") === 0 || row.itemId.indexOf("file.directory.") === 0)
++                  && MenuModel.localFileUrl(row.action).length > 0
++                onActiveChanged: if (active) {
++                  mouseArea.fileDragStarted = true
++                  root.cursorActive = true
++                  root.selectedIndex = row.index
++                  fileDragSource.begin(row.action, row.itemId.indexOf("file.directory.") === 0)
++                }
++              }
+             }
+           }
+ 
+diff --git a/MenuModel.js b/MenuModel.js
+index 321ae17..1b52e20 100644
+--- a/MenuModel.js
++++ b/MenuModel.js
+@@ -1329,6 +1329,7 @@ function normalizeExtension(raw) {
+   if (mode !== "workflow" && command.length === 0) return null
+   if (mode !== "menu" && (raw.configuration !== undefined || raw.refreshable !== undefined)) return null
+   if (raw.refreshable !== undefined && typeof raw.refreshable !== "boolean") return null
++  if (raw.dragAndDrop !== undefined && (mode !== "files" || typeof raw.dragAndDrop !== "boolean")) return null
+   var configurationProvider = ""
+   if (raw.configuration !== undefined) {
+     if (!raw.configuration || typeof raw.configuration !== "object" || Array.isArray(raw.configuration)
+@@ -1400,6 +1401,7 @@ function normalizeExtension(raw) {
+       }
+     } else if (mode === "files") {
+       extension.root = String(raw.root || "~")
++      extension.dragAndDrop = raw.dragAndDrop === true
+       extension.directoryCommand = stringArray(raw.directoryCommand)
+       if (extension.directoryCommand.length === 0) extension.directoryCommand = extension.command
+       extension.terminalCommand = stringArray(raw.terminalCommand)
+diff --git a/README.md b/README.md
+index c2d7813..ebf9986 100644
+--- a/README.md
++++ b/README.md
+@@ -86,6 +86,8 @@ Open **Web Search**, select a search engine, enter a query, and press Enter. Oma
+ 
+ Type `files` and activate the **Files** result to browse from your home directory. Select folders to navigate, type to search recursively within the current folder, and select a file to open it with the default application. Supported image files show thumbnails in the result list and a larger preview pane when selected. Directory contents are ordered by most recently modified, while search uses `fd` with fzf's path-aware relevance ranking. A short-lived per-directory index is reused while typing so each query does not traverse the filesystem again. Hidden and ignored files are excluded.
+ 
++File-browser providers can opt into native file and folder dragging with `dragAndDrop: true`. Drag a result onto a window that accepts file drops; the launcher gets out of the way and closes after the drop or cancellation. Drags use copy semantics and leave the original in place. Providers that omit this setting keep their existing behavior. The host advertises this optional API as `files.drag-and-drop.v1` in its manifest; see [EXTENSIONS.md](EXTENSIONS.md).
++
+ Press Ctrl+K on a selected item to open its Action Panel. Directories can be opened in Files or a terminal, while files can be opened with their default application. Files and directories can also be starred for the launcher’s starting view from the Action Panel or directly with Ctrl+S. Every item supports copying its path or copying the item to the file clipboard. Ctrl+C remains a shortcut for copying the selected path.
+ 
+ ![Browsing files and using the contextual Action Panel in Omalaunch](assets/files-action-panel.gif)
+diff --git a/manifest.json b/manifest.json
+index 7e8845c..bc3ef6f 100644
+--- a/manifest.json
++++ b/manifest.json
+@@ -22,6 +22,9 @@
+     "defaultSection": "left",
+     "allowMultiple": false
+   },
++  "omalaunch": {
++    "hostFeatures": ["files.drag-and-drop.v1"]
++  },
+   "omarchy": {
+     "clonedFrom": "omarchy.menu"
+   }
+diff --git a/tests/menu-model-test.js b/tests/menu-model-test.js
+index 3b73126..e4fcfce 100644
+--- a/tests/menu-model-test.js
++++ b/tests/menu-model-test.js
+@@ -99,6 +99,59 @@ assert(filesExtension[0].copyCommand[2] === '{path}', 'file browser copy path co
+ assert(filesExtension[0].copyFileCommand[1] === '{path}', 'file browser copy file commands are retained')
+ assert(filesExtension[0].terminalCommand[1] === '--dir={path}', 'file browser terminal commands are retained')
+ assert(menu.extensionRootActivation(filesExtension[0]) === 'files', 'Files root activation selects the browser')
++assert(filesExtension[0].dragAndDrop === false, 'existing Files providers do not opt into native dragging implicitly')
++
++const dragFilesFixture = {
++  schemaVersion: 1,
++  id: 'example.drag-files',
++  capability: 'files',
++  mode: 'files',
++  label: 'Files with Drag-and-Drop',
++  prefixes: ['files'],
++  command: ['xdg-open', '{path}'],
++  priority: 10,
++  dragAndDrop: true
++}
++assert(menu.normalizeExtension(dragFilesFixture).dragAndDrop === true,
++  'Files providers can explicitly opt into native dragging')
++assert(menu.normalizeExtension({ ...dragFilesFixture, dragAndDrop: false }).dragAndDrop === false,
++  'Files providers can explicitly keep native dragging disabled')
++for (const invalidDragValue of [null, 0, 1, 'true', 'false', [], {}]) {
++  assert(menu.normalizeExtension({ ...dragFilesFixture, dragAndDrop: invalidDragValue }) === null,
++    `Files dragAndDrop rejects non-boolean ${JSON.stringify(invalidDragValue)}`)
++}
++for (const nonFilesMode of ['prefix', 'query', 'workflow', 'menu']) {
++  const nonFilesFixture = {
++    ...dragFilesFixture,
++    mode: nonFilesMode,
++    match: { all: ['.'] },
++    workflow: { items: [{ id: 'run', kind: 'action', label: 'Run', command: ['printf', 'example'] }] }
++  }
++  delete nonFilesFixture.dragAndDrop
++  assert(menu.normalizeExtension(nonFilesFixture) !== null, `${nonFilesMode} fixture is valid without dragAndDrop`)
++  for (const value of [true, false]) {
++    assert(menu.normalizeExtension({ ...nonFilesFixture, dragAndDrop: value }) === null,
++      `${nonFilesMode} providers cannot declare dragAndDrop even when ${value}`)
++  }
++}
++const bundledFilesFixture = {
++  ...dragFilesFixture,
++  id: 'omalaunch.files',
++  _bundled: true
++}
++delete bundledFilesFixture.dragAndDrop
++const selectedDragFiles = menu.parseExtensions(JSON.stringify([bundledFilesFixture, dragFilesFixture]))[0]
++assert(selectedDragFiles.id === dragFilesFixture.id && selectedDragFiles.dragAndDrop === true,
++  'an enabled external Files provider selects its own native-drag opt-in')
++const disabledDragFiles = menu.parseExtensions(JSON.stringify([bundledFilesFixture]))[0]
++assert(disabledDragFiles.id === bundledFilesFixture.id && disabledDragFiles.dragAndDrop === false,
++  'disabling the drag provider restores bundled Files without native dragging')
++const unavailableDragFiles = menu.parseExtensions(JSON.stringify([
++  bundledFilesFixture, { ...dragFilesFixture, _missingRequires: ['fixture-unavailable-command'] }
++]))[0]
++assert(unavailableDragFiles.id === bundledFilesFixture.id && unavailableDragFiles.dragAndDrop === false,
++  'an unavailable drag provider cannot enable dragging on the fallback provider')
++
+ assert(menu.isImagePath('/tmp/Photo.JPEG'), 'image paths are recognized case-insensitively')
+ assert(menu.isImagePath('/tmp/vector.svg'), 'SVG paths are recognized for previews')
+ assert(!menu.isImagePath('/tmp/photo.jpeg.txt'), 'non-image paths do not get previews')

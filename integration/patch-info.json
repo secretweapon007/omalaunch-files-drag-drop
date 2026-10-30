@@ -1,0 +1,16 @@
+{
+  "baseCommit": "2f464963b7471b54bb917341c07847c1387d3ac8",
+  "baseVersion": "0.5.3",
+  "hostFeature": "files.drag-and-drop.v1",
+  "patch": "omalaunch-0.5.3-files-drag-api-v1.patch",
+  "sha256": "c7da2bdcff88d0ecd5d60ad56f862b660acd3b05a1eec76f7780f8d435c658a9",
+  "files": [
+    "EXTENSIONS.md",
+    "FileDragSource.qml",
+    "Menu.qml",
+    "MenuModel.js",
+    "README.md",
+    "manifest.json",
+    "tests/menu-model-test.js"
+  ]
+}

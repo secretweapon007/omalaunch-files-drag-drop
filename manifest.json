@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "secretweapon.omalaunch-files-drag-drop",
+  "name": "Omalaunch Files Drag & Drop",
+  "version": "0.1.0",
+  "author": "Secretweapon",
+  "license": "MIT",
+  "description": "Drag Files search results into other applications",
+  "kinds": ["extension"],
+  "entryPoints": {},
+  "omalaunch": {
+    "extensionProviders": [["./bin/catalog"]]
+  }
+}

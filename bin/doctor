@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+"""Check compatibility and executable requirements without changing the desktop."""
+import argparse
+import json
+from pathlib import Path
+import shutil
+import sys
+
+sys.dont_write_bytecode = True
+PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PLUGIN_ROOT / "lib"))
+from host_support import CompatibilityError, HOST_FEATURE, require_host
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--host", type=Path, help="inspect a specific host source/installation directory")
+parser.add_argument("--json", action="store_true", help="print a machine-readable result")
+args = parser.parse_args()
+try:
+    host = require_host(args.host)
+    descriptor = json.loads((PLUGIN_ROOT / "omalaunch.json").read_text(encoding="utf-8"))
+    missing = [name for name in descriptor["requires"] if shutil.which(name) is None]
+    if missing:
+        raise CompatibilityError("Missing executables: " + ", ".join(missing) + ".")
+except (CompatibilityError, OSError, ValueError) as error:
+    if args.json:
+        print(json.dumps({"ok": False, "requiredFeature": HOST_FEATURE, "error": str(error)}))
+    else:
+        print(f"Files Drag & Drop: {error}", file=sys.stderr)
+    raise SystemExit(1)
+if args.json:
+    print(json.dumps({"ok": True, "host": str(host.path), "version": host.version, "feature": HOST_FEATURE}))
+else:
+    print(f"Compatible: Omalaunch {host.version} at {host.path} advertises {HOST_FEATURE}.")
+    print("Required executables are available. No files or desktop settings were changed.")
